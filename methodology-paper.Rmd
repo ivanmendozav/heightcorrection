@@ -1,0 +1,358 @@
+---
+title: "Methodology of Paper"
+author: "Written by Ivan Mendoza V."
+date: "Universidad del Azuay - Facultad de Ciencia y Tecnología"
+output:
+  word_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, include = T, error = F, warning = F, message = F, dpi=300, comment = "")
+source("D:/OneDrive/UDA 2022/investigacion/clasificador/CorrectorAlturas/heightcorrector.R")
+
+library(ggplot2)
+library(gridExtra)
+library(dbscan)
+library(dplyr)
+library(data.table)
+library(lubridate)
+```
+ 
+ This paper illustrates an approch to detect and correct height outliers through a sequential density-based agglomerative process and a multi-step k-neighbours regression. The document is organized as follows: firstly a literature review about GPS coordinates correction, then the methodology to implement a Density-Based Height Correction (DBHC), finally a discussion about the results and possible future works.
+
+```{r}
+setwd("D:/OneDrive/UDA 2022/investigacion/clasificador/CorrectorAlturas/datasets")
+estacion <- read.csv("Datos Estación Central.csv")
+estacion %>% select(X.1,Y.1,Altura.1) -> estacion
+setnames(estacion,"X.1","x")
+setnames(estacion,"Y.1","y")
+setnames(estacion,"Altura.1","Height")
+estacion <- get_distances(estacion)
+lims <- list(minx=min(estacion$x),maxx=max(estacion$x),miny=min(estacion$y),maxy=max(estacion$y))
+modelo <- lm(formula=Height~Acc.Distance,data = estacion)
+```
+
+
+## Methodology
+The following steps describe the sequence of tasks required to parse the raw GPS data, so that heights are corrected after outliers are detected.
+
+```{r}
+library(DiagrammeR)
+library(webshot)
+
+grViz("digraph {
+  graph [layout = neato, rankdir = LR, splines = line]
+  
+  node [shape = rectangle, pin = true]        
+  rec1 [label = '1. Data Pre-processing', pos='1,5!'];
+  rec2 [label = '2. Outlier Detection', pos='1,4!'];
+  rec3 [label = '3. Model Generation', pos='1,3!'];
+  rec4 [label = '4. Height Correction', pos='1,2!'];
+  rec5 [label = '5. Data Validation', pos='1,1!'];
+ 
+  rec1 -> rec2 -> rec3 -> rec4 -> rec5
+
+}")
+
+```
+
+### 1. Data Pre-processing
+
+Information coming from applications that use the GPS sensors in mobile devices, generally have the following structure for data points along a trip.
+
+```{r}
+setwd("D:/OneDrive/UDA 2022/investigacion/clasificador/CorrectorAlturas/datasets")
+data <- read.table("GUS2022-02-03 16_17_40.csv",sep="\t",header = TRUE,skipNul = T)
+data %>% select(Latitude,Longitude,Altitude,Date) -> gus
+setnames(gus,"Altitude","Height")
+gus$Latitude <- round(gus$Latitude,5)
+gus$Longitude <- round(gus$Longitude,5)
+dates <- lubridate::ymd_hms(gus$Date)
+gus$Timestamp <- paste(hour(dates),":",minute(dates),":",trunc(second(dates)),sep = "")
+gus$Date <- NULL
+gus$Height <- as.numeric(sub("([.])","",gus$Height))
+gus <- cbind(Seq=1:nrow(gus),gus)
+print(head(gus), row.names = F)
+```
+A bounding box is selected for the study area so that latitude and longitude constraints are applied to data points. Then, in order to work with distances for further computations, a Cartesian projection is more adequate. A projection for the UTM zone 17S gives the following results in meters; when the distance between each data point has been added, allowing to compute the accumulated distance for the trip so that the complete dataset has the following structure.
+
+```{r}
+gus <- gus[gus$Seq>=500 & gus$Seq<=685,]
+gus <- transform_to(gus,32717)
+gus <- gus[gus$x>=lims$minx & gus$x<=lims$maxx & gus$y>=lims$miny & gus$y<=lims$maxy,]
+gus <- get_distances(gus)
+gus$Seq <- 1:nrow(gus)
+
+#GAP correction from reference dataset
+error <- mean(gus$Height - as.numeric(predict(modelo,gus)))
+gus$Height <- gus$Height - error
+print(tail(gus), row.names = F)
+```
+The meaning of each column and variable's notation is:
+
+- *Sequence (i):* Unique identifier indicating the order in the sequence of data points, so that the oldest point is the first one in the sequence.
+
+- *Latitude, Longitude:* $Lat_i$,$Lon_i$ Coordinates in standard WGS84 system.
+
+- *Height:* $h_i$ Altitude above sea level.
+
+- *Timestamp:* $t_i$ Time stamp indicating when the data point was collected.
+
+- *X, Y:* $x_i$,$y_i$ Cartesian Coordinates in meters based on a UTM (Universal Transverse Mercator) coordinate system
+
+- *Distance:* $d_{(i-1,i)}$ Euclidean distance in meters from the previous data point.
+
+- *Acc.Distance:* $D_i$ Accumulated distance at coordinates $x_i$,$y_i$ from the first data point in the trajectory.
+
+Finally a geometry can be inferred for the trajectory by applying a curve fitting on the data points in the Cartesian coordinates. The resulting geometries for  variables X and Y, as well as for Height and Accumulated distances are presented. We can observe that heights have abrupt changes 
+
+```{r}
+plot1 <- ggplot()+geom_line(data=gus,                    aes(x=x,y=y),                    color="steelblue")  + ggtitle("X vs Y") + xlab("X (meters)") + ylab("Y (meters)")
+
+plot2 <- ggplot()+geom_line(data=gus,                    aes(x=Acc.Distance,y=Height),                    color="steelblue")  + ggtitle("Acc.Distance vs Height") + xlab("Acc.Distance (meters)") + ylab("Height (meters)")
+
+grid.arrange(plot1,plot2,ncol=2)
+```
+The following datasets are included in this study. All raw data were already processed to have the same structure and variables mentioned earlier.
+
+*Reference Dataset "R":* This dataset was collected with a total station along a road between the cities of Toluca and Mexico DF. A glimpse of the data is given.
+
+```{r}
+setwd("D:/OneDrive/UDA 2022/investigacion/clasificador/CorrectorAlturas/datasets")
+estacionmex <- read.csv("Archivo final marquesa.csv")
+estacionmex %>% select(Lat,Long,Z,Distancia.acum..m.,X,Y,Distancia..m.) %>% filter(Long>=-99.64,Long<=-99.39) -> estacionmex
+colnames(estacionmex) <- c("Latitude","Longitude","Height","Acc.Distance","x","y","Distance")
+modelomex <- lm(formula=Height~Acc.Distance,data = estacionmex)
+glimpse(estacionmex)
+
+```
+
+```{r}
+estacionmex$dHeight <- 0
+for(i in 2:nrow(estacionmex)){
+  estacionmex[i,]$dHeight <- abs(estacionmex[i,]$Height-estacionmex[i-1,]$Height)
+}
+
+```
+
+
+*User Dataset "M":* This dataset was collected via navigation systems along a car trip between the two mentioned cities. A glimpse of the data is also given and plots are presented to compared the two datasets once data points have been interpolated. Since data from a total station only measures height differences between collected points (being a very accurate method), heights at sea level must be inferred by providing a reference value to the first measured point with an external device. The average height differences between both datasets is used as a measure corrector $\Delta_h$, that is:
+
+$$\delta_h=E[\textbf{h}_{(r)}-\textbf{h}_{(m)}]$$
+where $h_{(r)}$ is a vector with interpolated height measures from dataset *R* and $h_{(m)}$ from a user dataset *M*, so that the corrected heights in *R* can be computed by:
+
+$$h_{i(r)}^*=h_{i(r)}-\delta_h$$
+
+```{r}
+setwd("D:/OneDrive/UDA 2022/investigacion/clasificador/CorrectorAlturas/datasets")
+gps <- read.csv("Viajes MEX-TOL.csv")
+gps %>% select(latitud,longitud,altitud) %>% filter(longitud>=-99.64,longitud<=-99.39) -> gps
+colnames(gps) <- c("Latitude","Longitude","Height")
+gps <- transform_to(gps, 6371) 
+#UTM Mexico 
+gps <- get_distances(gps)
+
+#correct height
+error <- mean(gps$Height - as.numeric(predict(modelomex,gps)))
+gps$Height <- gps$Height - error
+
+gps$dHeight <- 0
+for(i in 2:nrow(gps)){
+  gps[i,]$dHeight <- abs(gps[i,]$Height-gps[i-1,]$Height)
+}
+
+#Plot U and R
+gps$group <- "Device M"
+estacionmex$group <- "Total Station (R)"
+gall <- rbind(gps,estacionmex)
+
+g1 <- ggplot(data=gall, aes(x=Longitude, y=Latitude, color=group))+xlab("Longitude")+ylab("Latitude")+ geom_line(alpha=0.9)
+
+g2 <- ggplot(data=gall, aes(x=Acc.Distance, y=Height, color=group))+xlab("Acc.Distance(m)")+ylab("Height(m)")+ geom_line(alpha=0.9) 
+
+grid.arrange(g1,g2)
+```
+
+The last figure presents differences between both datasets for the relevant variables, it can be seen that major differences occur in height measures. In order to quantify the differences between both datasets, data points are transformed to curves and residuals are computed at fixed values $D_i$ of the accumulated distances. Then the mean squared error (MSE) of height measures between both datasets is found according to the following formula:
+
+$$err_{(r,m)}= \frac{1}{N}\sum_i{(h_{i(m)}-\hat{h}_{i(r)} )^2}$$
+where $\hat{h}_{i(r)}$ is estimated when learning a function *f* by polynomial regression in dataset *R*, such as $\hat{h}_{i(r)}=f(D_i)$. 
+
+```{r}
+#MSE
+mse_gps <- (mean((gps$Height - as.numeric(predict(modelomex,gps)))^2))
+```
+
+The value of $err_{(r,m)}$ for datasets *R* and *M* was found to be `r mse_gps`. This measure must stay acceptable after applying the height correction approach described in this paper, since the reference dataset in this study is considered the ground truth for gurther comparisons.
+
+### 2. Outlier Detection
+
+Without having a reference dataset, it is not possible to detect large errors in height measures, so a method for detection of outliers in height measures must be provided. An approach based on agglomerative clustering is fully described in this section.
+
+A sequence of ordered height measures, that is $t_i > t_{i-1}$ with respect to timestamps is assumed, then data points are merged into the same cluster according to the following rule.
+
+
+$$h_{(i-1, i)} \le \epsilon$$
+
+where $h_{(i-1, i)}$ is the absolute difference between consecutive measures and  $\epsilon>0$ is the search distance of the agglomerative clustering process as used in most density-based methods, that is,
+
+$$h_{(i-1, i)} = |h_i-h_{i-1}|$$
+
+As soon as the "gap" between two data points is larger than the specified radius, the process restarts by creating a new group from the next point in the sequence. At the end of the process a structure with *k* clusters is created.  If $\epsilon$ is carefully calibrated based on an acceptable height difference between consecutive measures, a trajectory without gaps should produce one single cluster (*k=1*). The approach presented in further sections attempt to "smooth" these differences so that gaps are removed. The histogram of consecutive height differences in dataset *M* is presented below.
+
+```{r}
+ggplot(gps, aes(x=dHeight))+geom_histogram(bins=100)+ xlab("Height Differences (m)")
+```
+
+Here, outliers appear beyond 2 meters, so that upper bounds for acceptable differences must roughly yield in the range $[2, 3)$.
+The correction approach in further sections works on those gaps where errors in height detection is assumed. In contrast to other density-based methods such as DBSCAN, the clustering is carried out only on consecutive points so that gaps are detected in the trajectory. The following plot shows the detected clusters when $\epsilon=1.75$. The size of each cluster is also reported, nevertheless, clusters with one single observation have been excluded from the report and plots (showing as empty spaces).
+
+```{r}
+tol = 1.75 #Ajustar tolerancia
+gps2 <- sddclust(gps,tolerance=tol)
+
+#plot gaps
+d <- as.data.frame(table(gps2$sdd_cluster))
+colnames(d) <- c("Cluster","Data_points")
+d[d$Data_points>1,]
+
+plotset<-gps2[gps2$sdd_cluster %in% d[d$Data_points>1,]$Cluster,]
+ggplot(plotset, aes(x=Acc.Distance,y=Height,color=factor(sdd_cluster)))+geom_point() + xlab("Accumulated distance(m)")+ylab("Height(m)")
+```
+
+```{r}
+tol = 1.75 #Ajustar tolerancia
+n <- 1
+while(n>0){
+  tol = tol + 0.1
+  gps2 <- sddclust(gps,tolerance=tol)
+  islas <- data.frame(table(gps2$sdd_cluster))
+  n <- nrow(islas[islas$Freq<2,])
+}
+```
+
+
+The calibration of $\epsilon$ can be carried out by increasing its value until no single-point clusters are included in the final structure. Taking this approach the results when $\epsilon$ is `r tol` are given.
+
+```{r}
+
+#plot gaps
+d <- as.data.frame(table(gps2$sdd_cluster))
+colnames(d) <- c("Cluster","Data_points")
+d[d$Data_points>1,]
+
+plotset<-gps2[gps2$sdd_cluster %in% d[d$Data_points>1,]$Cluster,]
+ggplot(plotset, aes(x=Acc.Distance,y=Height,color=factor(sdd_cluster)))+geom_point() + xlab("Accumulated distance(m)")+ylab("Height(m)")
+```
+
+The number of gaps equals the number of clusters minus one. From this moment a gap will be called an *"oulier"* for the rest of the document. The next section explains a method to remove these outliers by replacing the data points on each cluster's borders. 
+
+### 3. Model Generation
+
+In order to smooth out data so that large height differences "disappear", data points around the borders of each cluster must be replaced so that altitudes are corrected. One option is adding point interpolations based on the nearest neighbors surrounding the outliers. For this, a regression model using the neighborhood of each gap is created with the following procedure.
+
+Let $N_j$ be the neighborhood of a single outlier $j$, consisting of $m$ points collected before and after $j$ in the points sequence, then:
+
+$$N_j = \{p_{j-m},p_{j-m+1},..,p_j,..,p_{j+m-1},p_{j+m}\}$$
+where each point $p_i$ has coordinates $x_i$, $y_i$, $h_i$, besides the corresponding accumulated distances. Another approach would be to use a specific radius to search for points in the neighborhood of $j$; however, since data points are not equally spaced and time intervals are not always fixed when collecting data, there a risk of having empty sets for a small radius. The estimate value of height around $j$ using the accumulated distance as a predictor, produces this regression function.
+
+$$\hat{h} = F_{hj}(D_i)$$
+where $D_i$ is the accumulated distance of point $i$, subject to
+$p_i \in N_j$. It must be noticed that, there are as many functions as outliers in the dataset.
+
+Moreover, since *new* points lack of other information, models for tasks besides height prediction must also be constructed, so that other functions are required for $x, y$ coordinates.
+
+$$\hat{x} = F_{xj}(D_i)$$
+$$\hat{y} = F_{yj}(D_i)$$
+As a final note, the linear models used in this paper based on k-nearest neighbors can be replaced with higher level polynomials to avoid straight lines on gaps. 
+
+### 4. Height Correction
+
+From these variables, estimates for accumulated distances and timestamps can be easily obtained. At last, the accumulated distances of the border points of each ordered pair of clusters $C_k, C_{k+1}$ are used to obtain the following $n$ interpolations.
+
+$$<D_{C_k}, D_{1}, D_{2}, ...,D_n, D_{C_{k+1}}>$$
+
+where $D_{C_k}$ is the accumulated distance at the last point of cluster $C_k$ and $D_{C_{k+1}}$ is the corresponding distance at the first point of cluster $C_{k+1}$, so that $D_i=D_{i-1}+\alpha$. The increment depends on the number of interpolations, that is
+
+$$\alpha = \frac{D_{C_{k+1}}-D_{C_k}}{n}$$
+The parameter $n$ must be large enough so that no new gaps are detected in the same location of the previous ones. The resulting dataset *M'* after the height correction algorithm with $m=5$ and $n=10$ has fewer clusters as shown below.
+
+```{r}
+gps3 <- height_correction(gps2, 5, tol,10)
+
+#plot gaps
+d <- as.data.frame(table(gps3$sdd_cluster))
+colnames(d) <- c("Cluster","Data_points")
+d[d$Data_points>1,]
+
+plotset<-gps3[gps3$sdd_cluster %in% d[d$Data_points>1,]$Cluster,]
+ggplot(plotset, aes(x=Acc.Distance,y=Height,color=factor(sdd_cluster)))+geom_point() + xlab("Accumulated distance(m)")+ylab("Height(m)")
+```
+
+After the algorithm is executed, the clustering is performed one more time to verify the gaps reduction. The parameters can be calibrated in order to remove all gaps, nevertheless the larger this value the more synthetic points are added to the original dataset, as larger gaps are smoothed. 
+
+The new height differences have fewer extreme values as expected as can be seen in the following histogram.
+
+```{r}
+gps3$dHeight <- 0
+for(i in 2:nrow(gps3)){
+  gps3[i,]$dHeight <- abs(gps3[i,]$Height-gps3[i-1,]$Height)
+}
+ggplot(gps3, aes(x=dHeight))+geom_histogram(bins=100) + xlab("Height Differences (m)")
+```
+
+### 5. Data Validation
+
+In order to verify whether or not the algorithm has made the user's dataset closer to the reference dataset R, the performance is checked one more time with respect to MSE. 
+
+```{r}
+mse_gps3 <- (mean((gps3$Height - as.numeric(predict(modelomex,gps3)))^2))
+```
+
+The new value of $err_{(r,m')}$ for datasets *R* and *M'* was found to be `r mse_gps3`. This measure is just slightly better (smaller) than that one with the previous uncorrected data, however the greatest advantage of this approach is that original has been kept unchanged unless outliers are detected, and changes are made only around the uncertain data. 
+
+At last, when compared to a public API such as Google Elevation, that retrieves heights based on stored data of latitudes and longitudes we get the following results.
+
+```{r}
+google <- chunk_elevations(gps)
+google$Height <- google$galt
+google$galt <- NULL
+google$group <- "Google API"
+```
+
+```{r}
+  google <- transform_to(google, 6371) 
+  #UTM Mexico 
+  google <- get_distances(google)
+  
+  #correct height
+  error <- mean(google$Height - as.numeric(predict(modelomex,google)))
+  google$Height <- google$Height - error
+  
+  mse_google <- (mean((google$Height - as.numeric(predict(modelomex,google)))^2))
+```
+
+The MSE when comparing the API data with the reference dataset is `r mse_google`, which is smaller than with the height correction algorithm, possibly due to an agressive interpolation as suggested in the plot below.
+
+```{r}
+estacionmex$sdd_cluster <- 0
+google$sdd_cluster <- 0
+
+gall <- rbind(gps3,estacionmex,google)
+ggplot(data=gall, aes(x=Acc.Distance, y=Height, color=group))+xlab("Acc.Distance(m)")+ylab("Height(m)")+ geom_line(alpha=0.9) 
+```
+
+Nevertheless, there are some unrealistic outliers as can be seen in the histogram of height differences.
+
+```{r}
+google$dHeight <- 0
+for(i in 2:nrow(google)){
+  google[i,]$dHeight <- abs(google[i,]$Height-google[i-1,]$Height)
+}
+ggplot(google, aes(x=dHeight))+geom_histogram(bins=100) + xlab("Height Differences (m)")
+```
+
+This fact will affect in the computation of slopes and energy consumption. Another possible alternative would be applying a height correction algorithm to the output of the API, however it will add more interpolations and assumptions on the actual data. 
+
+
